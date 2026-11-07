@@ -1,5 +1,6 @@
 from secrets import token_hex
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -246,3 +247,54 @@ async def test_empty_session_with_unknown_session_cookie_not_stored(memory_store
         assert res.status_code == 200
         assert res.headers["set-cookie"].startswith("session=null;")
         assert not await memory_store.exists("unknown")
+
+
+async def test_cleared_session_cookie_has_max_age_zero(memory_store: MemoryStore) -> None:
+    # https://github.com/litestar-org/litestar/issues/5171
+    @post("/login")
+    def login_handler(request: Request) -> None:
+        request.set_session({"foo": "bar"})
+
+    @post("/logout")
+    def logout_handler(request: Request) -> None:
+        request.clear_session()
+
+    app = Litestar(
+        [login_handler, logout_handler],
+        middleware=[ServerSideSessionConfig().middleware],
+        stores={"sessions": memory_store},
+    )
+
+    with TestClient(app) as client:
+        client.post("/login")
+        res = client.post("/logout")
+        assert res.status_code == 201
+        set_cookie = res.headers["set-cookie"]
+        assert set_cookie.startswith("session=null;")
+        assert "Max-Age=0" in set_cookie
+        assert "1209600" not in set_cookie
+
+
+async def test_load_from_connection_ignores_null_session_cookie(
+    server_side_session_backend: "ServerSideSessionBackend",
+    memory_store: MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # https://github.com/litestar-org/litestar/issues/5171
+    get_mock = AsyncMock()
+    monkeypatch.setattr(server_side_session_backend, "get", get_mock)
+
+    app = Litestar([], stores={"sessions": memory_store})
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(b"cookie", b"session=null")],
+            "app": app,
+        }
+    )
+
+    session = await server_side_session_backend.load_from_connection(request)
+    assert session == {}
+    get_mock.assert_not_called()

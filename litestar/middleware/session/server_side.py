@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal
 
 from litestar.datastructures import Cookie, MutableScopeHeaders
@@ -12,6 +12,9 @@ from litestar.types import Empty, Message, Scopes, ScopeSession
 from litestar.utils.dataclass import extract_dataclass_items
 
 __all__ = ("ServerSideSessionBackend", "ServerSideSessionConfig")
+
+SET_COOKIE_INCLUDE = {f.name for f in fields(Cookie) if f.name not in {"key", "secret"}}
+CLEAR_COOKIE_INCLUDE = {f.name for f in fields(Cookie) if f.name not in {"key", "secret", "max_age"}}
 
 
 if TYPE_CHECKING:
@@ -126,20 +129,24 @@ class ServerSideSessionBackend(BaseSessionBackend["ServerSideSessionConfig"]):
         headers = MutableScopeHeaders.from_message(message)
         session_id = self.get_session_id(connection)
 
-        cookie_params = dict(extract_dataclass_items(self.config, exclude_none=True, include=Cookie.__dict__.keys()))
-
         if scope_session is Empty or not scope_session:
             session_cookie = connection.cookies.get(self.config.key)
             if not session_cookie or session_cookie == "null":
                 return
             await self.delete(session_id, store=store)
+            clear_cookie_params = dict(
+                extract_dataclass_items(self.config, exclude_none=True, include=CLEAR_COOKIE_INCLUDE)
+            )
             headers.add(
                 "Set-Cookie",
-                Cookie(value="null", key=self.config.key, expires=0, **cookie_params).to_header(header=""),
+                Cookie(value="null", key=self.config.key, expires=0, max_age=0, **clear_cookie_params).to_header(
+                    header=""
+                ),
             )
         else:
             serialised_data = self.serialize_data(scope_session, scope)
             await self.set(session_id=session_id, data=serialised_data, store=store)
+            cookie_params = dict(extract_dataclass_items(self.config, exclude_none=True, include=SET_COOKIE_INCLUDE))
             headers.add(
                 "Set-Cookie", Cookie(value=session_id, key=self.config.key, **cookie_params).to_header(header="")
             )
@@ -160,7 +167,7 @@ class ServerSideSessionBackend(BaseSessionBackend["ServerSideSessionConfig"]):
         Returns:
             The current session data
         """
-        if session_id := connection.cookies.get(self.config.key):
+        if (session_id := connection.cookies.get(self.config.key)) and session_id != "null":
             store = self.config.get_store_from_app(connection.scope["app"])
             data = await self.get(session_id, store=store)
             if data is not None:
